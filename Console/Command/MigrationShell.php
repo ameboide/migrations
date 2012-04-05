@@ -18,6 +18,7 @@ App::uses('Shell', 'Console');
 App::uses('CakeSchema', 'Model');
 App::uses('MigrationVersion', 'Migrations.Lib');
 App::uses('String', 'Utility');
+App::uses('ForeignKeySchema', 'Migrations.Lib');
 
 /**
  * Migration shell.
@@ -93,6 +94,8 @@ class MigrationShell extends Shell {
 			'rename_field' => __d('Migrations', 'Renaming field :old_name to :new_name on :table.'),
 			'add_index' => __d('Migrations', 'Adding index :index to :table.'),
 			'drop_index' => __d('Migrations', 'Dropping index :index from :table.'),
+			'add_fk' => __d('Migrations', 'Adding foreign keys to :table.'),
+			'drop_fk' => __d('Migrations', 'Dropping foreign keys from :table.'),
 		);
 	}
 
@@ -284,6 +287,10 @@ class MigrationShell extends Shell {
 		$this->Schema = $this->_getSchema();
 		$migration = array('up' => array(), 'down' => array());
 
+		$foreignKeySchema = new ForeignKeySchema(array('connection' => $this->connection));
+		$newFks = $foreignKeySchema->generateSnaphsot();
+		$oldFks = array();
+		
 		$oldSchema = $this->_getSchema($this->type);
 		if ($oldSchema !== false) {
 			$response = $this->in(__d('Migrations', 'Do you want compare the schema.php file to the database?'), array('y', 'n'), 'y');
@@ -299,6 +306,8 @@ class MigrationShell extends Shell {
 				$migration = $this->_fromComparison($migration, $comparison, $oldSchema->tables, $newSchema['tables']);
 				
 				$fromSchema = true;
+				
+				$oldFks = $this->_readForeignKeys($this->type);
 			}
 		} else {
 			$response = $this->in(__d('Migrations', 'Do you want generate a dump from current database?'), array('y', 'n'), 'y');
@@ -318,9 +327,11 @@ class MigrationShell extends Shell {
 			}
 		}
 
+		$migrationFks = $foreignKeySchema->generateMigration($oldFks, $newFks);
+
 		$response = $this->in(__d('Migrations', 'Do you want to preview the file before generation?'), array('y', 'n'), 'y');
 		if (strtolower($response) === 'y') {
-			$this->out($this->_generateMigration('', 'PreviewMigration', $migration));
+			$this->out($this->_generateMigration('', 'PreviewMigration', $migration, $migrationFks));
 		}
 
 		while (true) {
@@ -336,17 +347,18 @@ class MigrationShell extends Shell {
 
 		$this->out(__d('Migrations', 'Generating Migration...'));
 		$time = gmdate('U');
-		$this->_writeMigration($name, $time, $migration);
+		$this->_writeMigration($name, $time, $migration, $migrationFks);
 
 		if ($fromSchema) {
 			$this->Version->setVersion($time, $this->type);
 		}
+		$this->_writeForeignKeys($this->type);
 
 		$this->out('');
 		$this->out(__d('Migrations', 'Done.'));
 
 		if ($fromSchema && isset($comparison)) {
-			$response = $this->in(__d('Migrations', 'Do you want update the schema.php file?'), array('y', 'n'), 'y');
+			$response = $this->in(__d('Migrations', 'Do you want to update the schema.php file?'), array('y', 'n'), 'y');
 			if (strtolower($response) === 'y') {
 				$this->_updateSchema();
 			}
@@ -570,9 +582,10 @@ class MigrationShell extends Shell {
  * @param string $name Name of migration
  * @param string $class Class name of migration
  * @param array $migration Migration instructions array
+ * @param array $migrationFks Migration instructions for foreign keys
  * @return string
  */
-	protected function _generateMigration($name, $class, $migration) {
+	protected function _generateMigration($name, $class, $migration, $migrationFks) {
 		$content = '';
 		foreach ($migration as $direction => $actions) {
 			$content .= "\t\t'" . $direction . "' => array(\n";
@@ -620,7 +633,12 @@ class MigrationShell extends Shell {
 			}
 			$content .= "\t\t),\n";
 		}
-		$content = $this->__generateTemplate('migration', array('name' => $name, 'class' => $class, 'migration' => $content));
+		
+		$fks = var_export($migrationFks, true);
+		$fks = str_replace('  ', "\t", $fks);
+		$fks = str_replace("\n", "\n\t", $fks);
+		
+		$content = $this->__generateTemplate('migration', array('name' => $name, 'class' => $class, 'migration' => $content, 'migrationFks' => $fks));
 		return $content;
 	}
 
@@ -630,11 +648,12 @@ class MigrationShell extends Shell {
  * @param string $name Name of migration
  * @param int the version number (timestamp)
  * @param array $migration Migration instructions array
+ * @param array $migrationFks Migration instructions for foreign keys
  * @return boolean
  */
-	protected function _writeMigration($name, $version, $migration) {
+	protected function _writeMigration($name, $version, $migration, $migrationFks) {
 		$content = '';
-		$content = $this->_generateMigration($name, Inflector::camelize($name), $migration);
+		$content = $this->_generateMigration($name, Inflector::camelize($name), $migration, $migrationFks);
 		$File = new File($this->path . $version . '_' . strtolower($name) . '.php', true);
 		return $File->write($content);
 	}
@@ -729,6 +748,43 @@ class MigrationShell extends Shell {
 			$this->out('      > ' . $message);
 		}
 	}
+	
+/**
+ * Load and construct the foreign keys schema if exists
+ *
+ * @param string $type Can be 'app' or a plugin name
+ * @return array The foreign keys schema
+ */
+	protected function _readForeignKeys($type) {
+		$file = $this->_getPath($type) . 'Config' . DS . 'Schema' . DS . 'foreign_keys.php';
+		if (!file_exists($file)) {
+			return array();
+		}
+		require_once $file;
+		
+		return $foreign_keys;
+	}
+	
+/**
+ * Write the updated foreign keys schema
+ *
+ * @param string $type Can be 'app' or a plugin name
+ * @param array $fks The new foreign keys schema
+ * @return boolean
+ */
+	protected function _writeForeignKeys($type, $fks = null) {
+		if($fks === null){
+			$foreignKeySchema = new ForeignKeySchema(array('connection' => $this->connection));
+			$fks = $foreignKeySchema->generateSnaphsot();
+		}
+		
+		$content = var_export($fks, true);
+		$content = str_replace('  ', "\t", $content);
+		$content = "<?php\n\$foreign_keys = $content;\n?>";
+		
+		$path = $this->_getPath($type) . 'Config' . DS . 'Schema' . DS . 'foreign_keys.php';
+		$File = new File($path, true);
+		return $File->write($content);
+	}
 }
 ?>
-

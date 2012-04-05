@@ -37,6 +37,14 @@ class <?php echo $class; ?> extends CakeMigration {
 	);
 
 /**
+ * Actions to be performed for foreign keys
+ *
+ * @var array $migrationFks
+ * @access public
+ */
+	public $migrationFks = <?php echo $migrationFks; ?>;
+
+/**
  * Before migration callback
  *
  * @param string $direction, up or down direction of migration process

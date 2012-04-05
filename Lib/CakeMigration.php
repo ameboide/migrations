@@ -64,6 +64,17 @@ class CakeMigration extends Object {
 	);
 
 /**
+ * Actions to be performed for foreign keys
+ *
+ * @var array $migrationFks
+ * @access public
+ */
+	public $migrationFks = array (
+		'up' => array('drop' => array(), 'add' => array()),
+		'down' => array('drop' => array(), 'add' => array())
+	);
+
+/**
  * Running direction
  *
  * @var string $direction
@@ -187,8 +198,10 @@ class CakeMigration extends Object {
  * @return void
  */
 	protected function _run() {
+		$this->_dropForeignKeys($this->migrationFks[$this->direction]['drop']);
+
 		//force the order of migration types
-		uksort($this->migration[$this->direction], array($this, 'migration_order'));
+		uksort($this->migration[$this->direction], array($this, '_migrationOrder'));
 		foreach ($this->migration[$this->direction] as $type => $info) {
 			switch ($type) {
 				case 'create_table':
@@ -224,6 +237,8 @@ class CakeMigration extends Object {
 
 			$this->{$methodName}($type, $info);
 		}
+
+		$this->_addForeignKeys($this->migrationFks[$this->direction]['add']);
 	}
 
 /**
@@ -233,7 +248,7 @@ class CakeMigration extends Object {
  * @param string $b Type
  * @return int Comparison value
  */
-	protected function migration_order($a, $b){
+	protected function _migrationOrder($a, $b){
 		$order = array('drop_table', 'rename_table', 'create_table', 'drop_field', 'rename_field', 'alter_field', 'create_field');
 
 		return array_search($a, $order) - array_search($b, $order);
@@ -503,6 +518,80 @@ class CakeMigration extends Object {
 		$options = array_merge($defaults, $options);
 
 		return new AppModel($options);
+	}
+	
+/**
+ * Add foreign keys for MySQL (InnoDB)
+ * @param array $data List of fields that act as foreign keys on each table, and their details
+ * @throws MigrationException 
+ */
+	protected function _addForeignKeys($data){
+		if(empty($data)){
+			return;
+		}
+		foreach($data as $table => $fks){
+			$lines = array();
+			foreach($fks as $field => $info){
+				$ref_table = $info['table'];
+				$ref_field = isset($info['column']) ? $info['column'] : 'id';
+				$on_del = isset($info['delete']) ? $info['delete'] : null;
+				$on_up = isset($info['update']) ? $info['update'] : null;
+
+				$sql = "ADD FOREIGN KEY ( $field ) REFERENCES $ref_table ( $ref_field )";
+				if($on_del) $sql .= " ON DELETE $on_del";
+				if($on_up) $sql .= " ON UPDATE $on_up";
+				$lines[] = $sql;
+			}
+
+			$sql = "ALTER TABLE $table " . implode(', ', $lines);
+			$this->_invokeCallbacks('beforeAction', '_addForeignKeys', array('table' => $table));
+			if (@$this->db->execute($sql) === false) {
+				throw new MigrationException($this, __d('migrations', 'SQL Error: %s', $this->db->error));
+			}
+			$this->_invokeCallbacks('afterAction', '_addForeignKeys', array('table' => $table));
+		}
+	}
+	
+/**
+ * Drop foreign keys for MySQL (InnoDB)
+ * @param array $data List of fields that act as foreign keys on each table
+ * @throws MigrationException 
+ */
+	protected function _dropForeignKeys($data){
+		if(empty($data)){
+			return;
+		}
+		$database = $this->db->config['database'];
+		foreach($data as $table => $cols){
+			if(!is_array($cols)){
+				$cols = array($cols);
+			}
+			$cols_csv = implode("', '", $cols);
+			
+			$sql_drop = "SELECT CONCAT('DROP FOREIGN KEY ', constraint_name) as q
+			FROM information_schema.key_column_usage
+			WHERE table_schema = '$database'
+			AND table_name = '$table'
+			AND column_name IN ('$cols_csv')
+			AND referenced_table_name IS NOT NULL";
+			
+			$res = $this->db->query($sql_drop);
+			if(empty($res)){
+				return;
+			}
+			
+			$lineas = array();
+			foreach($res as $elem){
+				$lineas[] = $elem[0]['q'];
+			}
+			
+			$sql = "ALTER TABLE $table " . implode(', ', $lineas);
+			$this->_invokeCallbacks('beforeAction', '_dropForeignKeys', array('table' => $table));
+			if (@$this->db->execute($sql) === false) {
+				throw new MigrationException($this, __d('migrations', 'SQL Error: %s', $this->db->error));
+			}
+			$this->_invokeCallbacks('afterAction', '_dropForeignKeys', array('table' => $table));
+		}
 	}
 }
 
